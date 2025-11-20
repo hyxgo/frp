@@ -20,10 +20,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fatedier/frp/pkg/msg"
-
 	"github.com/fatedier/golib/errors"
 	"github.com/fatedier/golib/pool"
+
+	"github.com/fatedier/frp/pkg/msg"
+	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
 
 func NewUDPPacket(buf []byte, laddr, raddr *net.UDPAddr) *msg.UDPPacket {
@@ -47,7 +48,7 @@ func ForwardUserConn(udpConn *net.UDPConn, readCh <-chan *msg.UDPPacket, sendCh 
 			if err != nil {
 				continue
 			}
-			udpConn.WriteToUDP(buf, udpMsg.RemoteAddr)
+			_, _ = udpConn.WriteToUDP(buf, udpMsg.RemoteAddr)
 		}
 	}()
 
@@ -69,10 +70,8 @@ func ForwardUserConn(udpConn *net.UDPConn, readCh <-chan *msg.UDPPacket, sendCh 
 	}
 }
 
-func Forwarder(dstAddr *net.UDPAddr, readCh <-chan *msg.UDPPacket, sendCh chan<- msg.Message, bufSize int) {
-	var (
-		mu sync.RWMutex
-	)
+func Forwarder(dstAddr *net.UDPAddr, readCh <-chan *msg.UDPPacket, sendCh chan<- msg.Message, bufSize int, proxyProtocolVersion string) {
+	var mu sync.RWMutex
 	udpConnMap := make(map[string]*net.UDPConn)
 
 	// read from dstAddr and write to sendCh
@@ -87,7 +86,7 @@ func Forwarder(dstAddr *net.UDPAddr, readCh <-chan *msg.UDPPacket, sendCh chan<-
 
 		buf := pool.GetBuf(bufSize)
 		for {
-			udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			_ = udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			n, _, err := udpConn.ReadFromUDP(buf)
 			if err != nil {
 				return
@@ -112,6 +111,7 @@ func Forwarder(dstAddr *net.UDPAddr, readCh <-chan *msg.UDPPacket, sendCh chan<-
 			if err != nil {
 				continue
 			}
+
 			mu.Lock()
 			udpConn, ok := udpConnMap[udpMsg.RemoteAddr.String()]
 			if !ok {
@@ -123,6 +123,18 @@ func Forwarder(dstAddr *net.UDPAddr, readCh <-chan *msg.UDPPacket, sendCh chan<-
 				udpConnMap[udpMsg.RemoteAddr.String()] = udpConn
 			}
 			mu.Unlock()
+
+			// Add proxy protocol header if configured
+			if proxyProtocolVersion != "" && udpMsg.RemoteAddr != nil {
+				ppBuf, err := netpkg.BuildProxyProtocolHeader(udpMsg.RemoteAddr, dstAddr, proxyProtocolVersion)
+				if err == nil {
+					// Prepend proxy protocol header to the UDP payload
+					finalBuf := make([]byte, len(ppBuf)+len(buf))
+					copy(finalBuf, ppBuf)
+					copy(finalBuf[len(ppBuf):], buf)
+					buf = finalBuf
+				}
+			}
 
 			_, err = udpConn.Write(buf)
 			if err != nil {

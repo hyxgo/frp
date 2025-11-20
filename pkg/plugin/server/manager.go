@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package plugin
+package server
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/fatedier/frp/pkg/util/util"
 	"github.com/fatedier/frp/pkg/util/xlog"
@@ -26,6 +27,7 @@ import (
 type Manager struct {
 	loginPlugins       []Plugin
 	newProxyPlugins    []Plugin
+	closeProxyPlugins  []Plugin
 	pingPlugins        []Plugin
 	newWorkConnPlugins []Plugin
 	newUserConnPlugins []Plugin
@@ -35,6 +37,7 @@ func NewManager() *Manager {
 	return &Manager{
 		loginPlugins:       make([]Plugin, 0),
 		newProxyPlugins:    make([]Plugin, 0),
+		closeProxyPlugins:  make([]Plugin, 0),
 		pingPlugins:        make([]Plugin, 0),
 		newWorkConnPlugins: make([]Plugin, 0),
 		newUserConnPlugins: make([]Plugin, 0),
@@ -47,6 +50,9 @@ func (m *Manager) Register(p Plugin) {
 	}
 	if p.IsSupport(OpNewProxy) {
 		m.newProxyPlugins = append(m.newProxyPlugins, p)
+	}
+	if p.IsSupport(OpCloseProxy) {
+		m.closeProxyPlugins = append(m.closeProxyPlugins, p)
 	}
 	if p.IsSupport(OpPing) {
 		m.pingPlugins = append(m.pingPlugins, p)
@@ -69,7 +75,7 @@ func (m *Manager) Login(content *LoginContent) (*LoginContent, error) {
 			Reject:   false,
 			Unchange: true,
 		}
-		retContent interface{}
+		retContent any
 		err        error
 	)
 	reqid, _ := util.RandID()
@@ -80,7 +86,7 @@ func (m *Manager) Login(content *LoginContent) (*LoginContent, error) {
 	for _, p := range m.loginPlugins {
 		res, retContent, err = p.Handle(ctx, OpLogin, *content)
 		if err != nil {
-			xl.Warn("send Login request to plugin [%s] error: %v", p.Name(), err)
+			xl.Warnf("send Login request to plugin [%s] error: %v", p.Name(), err)
 			return nil, errors.New("send Login request to plugin error")
 		}
 		if res.Reject {
@@ -103,7 +109,7 @@ func (m *Manager) NewProxy(content *NewProxyContent) (*NewProxyContent, error) {
 			Reject:   false,
 			Unchange: true,
 		}
-		retContent interface{}
+		retContent any
 		err        error
 	)
 	reqid, _ := util.RandID()
@@ -114,7 +120,7 @@ func (m *Manager) NewProxy(content *NewProxyContent) (*NewProxyContent, error) {
 	for _, p := range m.newProxyPlugins {
 		res, retContent, err = p.Handle(ctx, OpNewProxy, *content)
 		if err != nil {
-			xl.Warn("send NewProxy request to plugin [%s] error: %v", p.Name(), err)
+			xl.Warnf("send NewProxy request to plugin [%s] error: %v", p.Name(), err)
 			return nil, errors.New("send NewProxy request to plugin error")
 		}
 		if res.Reject {
@@ -127,6 +133,31 @@ func (m *Manager) NewProxy(content *NewProxyContent) (*NewProxyContent, error) {
 	return content, nil
 }
 
+func (m *Manager) CloseProxy(content *CloseProxyContent) error {
+	if len(m.closeProxyPlugins) == 0 {
+		return nil
+	}
+
+	errs := make([]string, 0)
+	reqid, _ := util.RandID()
+	xl := xlog.New().AppendPrefix("reqid: " + reqid)
+	ctx := xlog.NewContext(context.Background(), xl)
+	ctx = NewReqidContext(ctx, reqid)
+
+	for _, p := range m.closeProxyPlugins {
+		_, _, err := p.Handle(ctx, OpCloseProxy, *content)
+		if err != nil {
+			xl.Warnf("send CloseProxy request to plugin [%s] error: %v", p.Name(), err)
+			errs = append(errs, fmt.Sprintf("[%s]: %v", p.Name(), err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("send CloseProxy request to plugin errors: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 func (m *Manager) Ping(content *PingContent) (*PingContent, error) {
 	if len(m.pingPlugins) == 0 {
 		return content, nil
@@ -137,7 +168,7 @@ func (m *Manager) Ping(content *PingContent) (*PingContent, error) {
 			Reject:   false,
 			Unchange: true,
 		}
-		retContent interface{}
+		retContent any
 		err        error
 	)
 	reqid, _ := util.RandID()
@@ -148,7 +179,7 @@ func (m *Manager) Ping(content *PingContent) (*PingContent, error) {
 	for _, p := range m.pingPlugins {
 		res, retContent, err = p.Handle(ctx, OpPing, *content)
 		if err != nil {
-			xl.Warn("send Ping request to plugin [%s] error: %v", p.Name(), err)
+			xl.Warnf("send Ping request to plugin [%s] error: %v", p.Name(), err)
 			return nil, errors.New("send Ping request to plugin error")
 		}
 		if res.Reject {
@@ -171,7 +202,7 @@ func (m *Manager) NewWorkConn(content *NewWorkConnContent) (*NewWorkConnContent,
 			Reject:   false,
 			Unchange: true,
 		}
-		retContent interface{}
+		retContent any
 		err        error
 	)
 	reqid, _ := util.RandID()
@@ -179,10 +210,10 @@ func (m *Manager) NewWorkConn(content *NewWorkConnContent) (*NewWorkConnContent,
 	ctx := xlog.NewContext(context.Background(), xl)
 	ctx = NewReqidContext(ctx, reqid)
 
-	for _, p := range m.pingPlugins {
-		res, retContent, err = p.Handle(ctx, OpPing, *content)
+	for _, p := range m.newWorkConnPlugins {
+		res, retContent, err = p.Handle(ctx, OpNewWorkConn, *content)
 		if err != nil {
-			xl.Warn("send NewWorkConn request to plugin [%s] error: %v", p.Name(), err)
+			xl.Warnf("send NewWorkConn request to plugin [%s] error: %v", p.Name(), err)
 			return nil, errors.New("send NewWorkConn request to plugin error")
 		}
 		if res.Reject {
@@ -205,7 +236,7 @@ func (m *Manager) NewUserConn(content *NewUserConnContent) (*NewUserConnContent,
 			Reject:   false,
 			Unchange: true,
 		}
-		retContent interface{}
+		retContent any
 		err        error
 	)
 	reqid, _ := util.RandID()
@@ -216,7 +247,7 @@ func (m *Manager) NewUserConn(content *NewUserConnContent) (*NewUserConnContent,
 	for _, p := range m.newUserConnPlugins {
 		res, retContent, err = p.Handle(ctx, OpNewUserConn, *content)
 		if err != nil {
-			xl.Info("send NewUserConn request to plugin [%s] error: %v", p.Name(), err)
+			xl.Infof("send NewUserConn request to plugin [%s] error: %v", p.Name(), err)
 			return nil, errors.New("send NewUserConn request to plugin error")
 		}
 		if res.Reject {

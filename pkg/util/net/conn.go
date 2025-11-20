@@ -16,18 +16,16 @@ package net
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"sync/atomic"
 	"time"
 
-	"github.com/fatedier/frp/pkg/util/xlog"
+	"github.com/fatedier/golib/crypto"
+	quic "github.com/quic-go/quic-go"
 
-	gnet "github.com/fatedier/golib/net"
-	kcp "github.com/fatedier/kcp-go"
+	"github.com/fatedier/frp/pkg/util/xlog"
 )
 
 type ContextGetter interface {
@@ -78,9 +76,11 @@ type WrapReadWriteCloserConn struct {
 	io.ReadWriteCloser
 
 	underConn net.Conn
+
+	remoteAddr net.Addr
 }
 
-func WrapReadWriteCloserToConn(rwc io.ReadWriteCloser, underConn net.Conn) net.Conn {
+func WrapReadWriteCloserToConn(rwc io.ReadWriteCloser, underConn net.Conn) *WrapReadWriteCloserConn {
 	return &WrapReadWriteCloserConn{
 		ReadWriteCloser: rwc,
 		underConn:       underConn,
@@ -94,7 +94,14 @@ func (conn *WrapReadWriteCloserConn) LocalAddr() net.Addr {
 	return (*net.TCPAddr)(nil)
 }
 
+func (conn *WrapReadWriteCloserConn) SetRemoteAddr(addr net.Addr) {
+	conn.remoteAddr = addr
+}
+
 func (conn *WrapReadWriteCloserConn) RemoteAddr() net.Addr {
+	if conn.remoteAddr != nil {
+		return conn.remoteAddr
+	}
 	if conn.underConn != nil {
 		return conn.underConn.RemoteAddr()
 	}
@@ -189,55 +196,48 @@ func (statsConn *StatsConn) Close() (err error) {
 	return
 }
 
-func ConnectServer(protocol string, addr string) (c net.Conn, err error) {
-	switch protocol {
-	case "tcp":
-		return net.Dial("tcp", addr)
-	case "kcp":
-		kcpConn, errRet := kcp.DialWithOptions(addr, nil, 10, 3)
-		if errRet != nil {
-			err = errRet
-			return
-		}
-		kcpConn.SetStreamMode(true)
-		kcpConn.SetWriteDelay(true)
-		kcpConn.SetNoDelay(1, 20, 2, 1)
-		kcpConn.SetWindowSize(128, 512)
-		kcpConn.SetMtu(1350)
-		kcpConn.SetACKNoDelay(false)
-		kcpConn.SetReadBuffer(4194304)
-		kcpConn.SetWriteBuffer(4194304)
-		c = kcpConn
-		return
-	default:
-		return nil, fmt.Errorf("unsupport protocol: %s", protocol)
+type wrapQuicStream struct {
+	*quic.Stream
+	c *quic.Conn
+}
+
+func QuicStreamToNetConn(s *quic.Stream, c *quic.Conn) net.Conn {
+	return &wrapQuicStream{
+		Stream: s,
+		c:      c,
 	}
 }
 
-func ConnectServerByProxy(proxyURL string, protocol string, addr string) (c net.Conn, err error) {
-	switch protocol {
-	case "tcp":
-		return gnet.DialTcpByProxy(proxyURL, addr)
-	case "kcp":
-		// http proxy is not supported for kcp
-		return ConnectServer(protocol, addr)
-	case "websocket":
-		return ConnectWebsocketServer(addr)
-	default:
-		return nil, fmt.Errorf("unsupport protocol: %s", protocol)
+func (conn *wrapQuicStream) LocalAddr() net.Addr {
+	if conn.c != nil {
+		return conn.c.LocalAddr()
 	}
+	return (*net.TCPAddr)(nil)
 }
 
-func ConnectServerByProxyWithTLS(proxyURL string, protocol string, addr string, tlsConfig *tls.Config) (c net.Conn, err error) {
-	c, err = ConnectServerByProxy(proxyURL, protocol, addr)
+func (conn *wrapQuicStream) RemoteAddr() net.Addr {
+	if conn.c != nil {
+		return conn.c.RemoteAddr()
+	}
+	return (*net.TCPAddr)(nil)
+}
+
+func (conn *wrapQuicStream) Close() error {
+	conn.CancelRead(0)
+	return conn.Stream.Close()
+}
+
+func NewCryptoReadWriter(rw io.ReadWriter, key []byte) (io.ReadWriter, error) {
+	encReader := crypto.NewReader(rw, key)
+	encWriter, err := crypto.NewWriter(rw, key)
 	if err != nil {
-		return
+		return nil, err
 	}
-
-	if tlsConfig == nil {
-		return
-	}
-
-	c = WrapTLSClientConn(c, tlsConfig)
-	return
+	return struct {
+		io.Reader
+		io.Writer
+	}{
+		Reader: encReader,
+		Writer: encWriter,
+	}, nil
 }

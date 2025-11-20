@@ -17,102 +17,9 @@ package auth
 import (
 	"fmt"
 
-	"github.com/fatedier/frp/pkg/consts"
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
-
-	"github.com/vaughan0/go-ini"
 )
-
-type baseConfig struct {
-	// AuthenticationMethod specifies what authentication method to use to
-	// authenticate frpc with frps. If "token" is specified - token will be
-	// read into login message. If "oidc" is specified - OIDC (Open ID Connect)
-	// token will be issued using OIDC settings. By default, this value is "token".
-	AuthenticationMethod string `json:"authentication_method"`
-	// AuthenticateHeartBeats specifies whether to include authentication token in
-	// heartbeats sent to frps. By default, this value is false.
-	AuthenticateHeartBeats bool `json:"authenticate_heartbeats"`
-	// AuthenticateNewWorkConns specifies whether to include authentication token in
-	// new work connections sent to frps. By default, this value is false.
-	AuthenticateNewWorkConns bool `json:"authenticate_new_work_conns"`
-}
-
-func getDefaultBaseConf() baseConfig {
-	return baseConfig{
-		AuthenticationMethod:     "token",
-		AuthenticateHeartBeats:   false,
-		AuthenticateNewWorkConns: false,
-	}
-}
-
-func unmarshalBaseConfFromIni(conf ini.File) baseConfig {
-	var (
-		tmpStr string
-		ok     bool
-	)
-
-	cfg := getDefaultBaseConf()
-
-	if tmpStr, ok = conf.Get("common", "authentication_method"); ok {
-		cfg.AuthenticationMethod = tmpStr
-	}
-
-	if tmpStr, ok = conf.Get("common", "authenticate_heartbeats"); ok && tmpStr == "true" {
-		cfg.AuthenticateHeartBeats = true
-	} else {
-		cfg.AuthenticateHeartBeats = false
-	}
-
-	if tmpStr, ok = conf.Get("common", "authenticate_new_work_conns"); ok && tmpStr == "true" {
-		cfg.AuthenticateNewWorkConns = true
-	} else {
-		cfg.AuthenticateNewWorkConns = false
-	}
-
-	return cfg
-}
-
-type ClientConfig struct {
-	baseConfig
-	oidcClientConfig
-	tokenConfig
-}
-
-func GetDefaultClientConf() ClientConfig {
-	return ClientConfig{
-		baseConfig:       getDefaultBaseConf(),
-		oidcClientConfig: getDefaultOidcClientConf(),
-		tokenConfig:      getDefaultTokenConf(),
-	}
-}
-
-func UnmarshalClientConfFromIni(conf ini.File) (cfg ClientConfig) {
-	cfg.baseConfig = unmarshalBaseConfFromIni(conf)
-	cfg.oidcClientConfig = unmarshalOidcClientConfFromIni(conf)
-	cfg.tokenConfig = unmarshalTokenConfFromIni(conf)
-	return cfg
-}
-
-type ServerConfig struct {
-	baseConfig
-	oidcServerConfig
-	tokenConfig
-}
-
-func GetDefaultServerConf() ServerConfig {
-	return ServerConfig{
-		baseConfig:       getDefaultBaseConf(),
-		oidcServerConfig: getDefaultOidcServerConf(),
-		tokenConfig:      getDefaultTokenConf(),
-	}
-}
-
-func UnmarshalServerConfFromIni(conf ini.File) (cfg ServerConfig) {
-	cfg.baseConfig = unmarshalBaseConfFromIni(conf)
-	cfg.oidcServerConfig = unmarshalOidcServerConfFromIni(conf)
-	cfg.tokenConfig = unmarshalTokenConfFromIni(conf)
-	return cfg
-}
 
 type Setter interface {
 	SetLogin(*msg.Login) error
@@ -120,17 +27,19 @@ type Setter interface {
 	SetNewWorkConn(*msg.NewWorkConn) error
 }
 
-func NewAuthSetter(cfg ClientConfig) (authProvider Setter) {
-	switch cfg.AuthenticationMethod {
-	case consts.TokenAuthMethod:
-		authProvider = NewTokenAuth(cfg.baseConfig, cfg.tokenConfig)
-	case consts.OidcAuthMethod:
-		authProvider = NewOidcAuthSetter(cfg.baseConfig, cfg.oidcClientConfig)
+func NewAuthSetter(cfg v1.AuthClientConfig) (authProvider Setter, err error) {
+	switch cfg.Method {
+	case v1.AuthMethodToken:
+		authProvider = NewTokenAuth(cfg.AdditionalScopes, cfg.Token)
+	case v1.AuthMethodOIDC:
+		authProvider, err = NewOidcAuthSetter(cfg.AdditionalScopes, cfg.OIDC)
+		if err != nil {
+			return nil, err
+		}
 	default:
-		panic(fmt.Sprintf("wrong authentication method: '%s'", cfg.AuthenticationMethod))
+		return nil, fmt.Errorf("unsupported auth method: %s", cfg.Method)
 	}
-
-	return authProvider
+	return authProvider, nil
 }
 
 type Verifier interface {
@@ -139,13 +48,13 @@ type Verifier interface {
 	VerifyNewWorkConn(*msg.NewWorkConn) error
 }
 
-func NewAuthVerifier(cfg ServerConfig) (authVerifier Verifier) {
-	switch cfg.AuthenticationMethod {
-	case consts.TokenAuthMethod:
-		authVerifier = NewTokenAuth(cfg.baseConfig, cfg.tokenConfig)
-	case consts.OidcAuthMethod:
-		authVerifier = NewOidcAuthVerifier(cfg.baseConfig, cfg.oidcServerConfig)
+func NewAuthVerifier(cfg v1.AuthServerConfig) (authVerifier Verifier) {
+	switch cfg.Method {
+	case v1.AuthMethodToken:
+		authVerifier = NewTokenAuth(cfg.AdditionalScopes, cfg.Token)
+	case v1.AuthMethodOIDC:
+		tokenVerifier := NewTokenVerifier(cfg.OIDC)
+		authVerifier = NewOidcAuthVerifier(cfg.AdditionalScopes, tokenVerifier)
 	}
-
 	return authVerifier
 }

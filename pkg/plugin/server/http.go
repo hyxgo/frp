@@ -12,38 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package plugin
+package server
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
+
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 )
 
-type HTTPPluginOptions struct {
-	Name string
-	Addr string
-	Path string
-	Ops  []string
-}
-
 type httpPlugin struct {
-	options HTTPPluginOptions
+	options v1.HTTPPluginOptions
 
 	url    string
 	client *http.Client
 }
 
-func NewHTTPPluginOptions(options HTTPPluginOptions) Plugin {
+func NewHTTPPluginOptions(options v1.HTTPPluginOptions) Plugin {
+	url := fmt.Sprintf("%s%s", options.Addr, options.Path)
+
+	var client *http.Client
+	if strings.HasPrefix(url, "https://") {
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: !options.TLSVerify},
+		}
+		client = &http.Client{Transport: tr}
+	} else {
+		client = &http.Client{}
+	}
+
+	if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
+		url = "http://" + url
+	}
 	return &httpPlugin{
 		options: options,
-		url:     fmt.Sprintf("http://%s%s", options.Addr, options.Path),
-		client:  &http.Client{},
+		url:     url,
+		client:  client,
 	}
 }
 
@@ -60,7 +72,7 @@ func (p *httpPlugin) IsSupport(op string) bool {
 	return false
 }
 
-func (p *httpPlugin) Handle(ctx context.Context, op string, content interface{}) (*Response, interface{}, error) {
+func (p *httpPlugin) Handle(ctx context.Context, op string, content any) (*Response, any, error) {
 	r := &Request{
 		Version: APIVersion,
 		Op:      op,
@@ -98,12 +110,9 @@ func (p *httpPlugin) do(ctx context.Context, r *Request, res *Response) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("do http request error code: %d", resp.StatusCode)
 	}
-	buf, err = ioutil.ReadAll(resp.Body)
+	buf, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
-	if err = json.Unmarshal(buf, res); err != nil {
-		return err
-	}
-	return nil
+	return json.Unmarshal(buf, res)
 }
